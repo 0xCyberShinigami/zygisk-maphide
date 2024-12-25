@@ -37,7 +37,7 @@ public:
     }
 
 private:
-    zygisk::Api *api;
+    Api *api;
     JNIEnv *env;
 
     void toggleLibsslVisibility() {
@@ -53,29 +53,42 @@ private:
 
     void hideLibssl(const std::string &lib_path) {
         auto maps = lsplt::MapInfo::Scan();
-        for (const auto &region : maps) {
-            if (region.path == lib_path && (region.perms & PROT_EXEC)) {
+        for (auto iter = maps.begin(); iter != maps.end();) {
+            const auto &region = *iter;
+            if (region.path == lib_path) {
                 LOGI("Hiding libssl region: %zx-%zx", region.start, region.end);
-                void *addr = reinterpret_cast<void *>(region.start);
-                size_t size = region.end - region.start;
-                if (mprotect(addr, size, PROT_NONE) != 0) {
-                    LOGE("Failed to hide region: %zx-%zx", region.start, region.end);
-                }
+                iter = maps.erase(iter);
+            } else {
+                ++iter;
             }
         }
+        applyMaps(maps);
     }
 
     void unhideLibssl(const std::string &lib_path) {
         auto maps = lsplt::MapInfo::Scan();
         for (const auto &region : maps) {
-            if (region.path == lib_path && (region.perms & PROT_EXEC)) {
-                LOGI("Restoring libssl region: %zx-%zx", region.start, region.end);
-                void *addr = reinterpret_cast<void *>(region.start);
-                size_t size = region.end - region.start;
-                if (mprotect(addr, size, PROT_READ | PROT_EXEC) != 0) {
-                    LOGE("Failed to restore region: %zx-%zx", region.start, region.end);
-                }
+            if (region.path == lib_path) {
+                LOGI("Unhiding libssl region: %zx-%zx", region.start, region.end);
+                // Re-add the region (no-op for now since it’s handled by applyMaps in practice)
+                break;
             }
+        }
+        applyMaps(maps);
+    }
+
+    void applyMaps(const std::vector<lsplt::MapInfo> &maps) {
+        for (const auto &region : maps) {
+            LOGI("Applying map: %zx-%zx %s", region.start, region.end, region.path.c_str());
+            void *addr = reinterpret_cast<void *>(region.start);
+            size_t size = region.end - region.start;
+            void *copy = mmap(nullptr, size, PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+            if (copy == MAP_FAILED) {
+                LOGE("Failed to create anonymous mapping for region: %zx-%zx", region.start, region.end);
+                continue;
+            }
+            memcpy(copy, addr, size);
+            mremap(copy, size, size, MREMAP_MAYMOVE | MREMAP_FIXED, addr);
         }
     }
 };
