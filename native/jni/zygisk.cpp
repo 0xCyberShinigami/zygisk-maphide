@@ -3,90 +3,84 @@
 #include <fcntl.h>
 #include <android/log.h>
 #include <vector>
-#include <iostream>
+#include <thread>
+#include <chrono>
 #include <sys/mman.h>
-#include <stdio.h>
 #include <string>
 #include <sys/stat.h>
 
 #include "zygisk.hpp"
 #include <lsplt.hpp>
-#include <android/log.h>
 
 #define LOG_TAG "MapHide"
-
-#define LOGV(...) __android_log_print(ANDROID_LOG_VERBOSE, LOG_TAG, __VA_ARGS__)
-#define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
-#define LOGW(...) __android_log_print(ANDROID_LOG_WARN, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
-#define LOGF(...) __android_log_print(ANDROID_LOG_FATAL, LOG_TAG, __VA_ARGS__)
-
-static void hide_from_maps(std::vector<lsplt::MapInfo> maps) {
-    for (auto &info : maps) {
-        LOGI("hide: %s\n", info.path.data());
-        void *addr = reinterpret_cast<void *>(info.start);
-        size_t size = info.end - info.start;
-        void *copy = mmap(nullptr, size, PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
-        if ((info.perms & PROT_READ) == 0) {
-            mprotect(addr, size, PROT_READ);
-        }
-        memcpy(copy, addr, size);
-        mremap(copy, size, size, MREMAP_MAYMOVE | MREMAP_FIXED, addr);
-        mprotect(addr, size, info.perms);
-    }
-}
-
-using zygisk::Api;
-using zygisk::AppSpecializeArgs;
-using zygisk::ServerSpecializeArgs;
 
 class MapHide : public zygisk::ModuleBase {
 public:
-    void onLoad(Api *api, JNIEnv *env) override {
+    void onLoad(zygisk::Api *api, JNIEnv *env) override {
         this->api = api;
         this->env = env;
     }
 
-    void preAppSpecialize(AppSpecializeArgs *args) override {
+    void preAppSpecialize(zygisk::AppSpecializeArgs *args) override {
         uint32_t flags = api->getFlags();
-    	if ((flags & zygisk::PROCESS_ON_DENYLIST) && args->uid > 1000) {
-            DoHide();
-    	}
+        if ((flags & zygisk::PROCESS_ON_DENYLIST) && args->uid > 1000) {
+            LOGI("App on denylist detected, starting hide/unhide loop");
+            std::thread(&MapHide::toggleLibsslVisibility, this).detach();
+        }
         api->setOption(zygisk::Option::DLCLOSE_MODULE_LIBRARY);
     }
 
-    void preServerSpecialize(ServerSpecializeArgs *args) override {
+    void preServerSpecialize(zygisk::ServerSpecializeArgs *args) override {
         api->setOption(zygisk::Option::DLCLOSE_MODULE_LIBRARY);
     }
 
 private:
-    Api *api;
+    zygisk::Api *api;
     JNIEnv *env;
 
-    void DoHide() {
-    	auto maps = lsplt::MapInfo::Scan();
-        struct stat st;
-        if (stat("/data", &st)) return;
-        // hide module file from maps
-        // detection: https://github.com/vvb2060/MagiskDetector/blob/master/README_ZH.md
-        // hide all maps with path is data partition but path is not /data/*
-        for (auto iter = maps.begin(); iter != maps.end();) {
-            if (iter->dev != st.st_dev || 
-            (!(iter->path).starts_with("/system/") &&
-             !(iter->path).starts_with("/vendor/") &&
-             !(iter->path).starts_with("/product/") &&
-             !(iter->path).starts_with("/system_ext/"))) {
-                iter = maps.erase(iter);
-            } else {
-                ++iter;
+    void toggleLibsslVisibility() {
+        const std::string libssl_path = "/apex/com.android.conscrypt/lib64/libssl.so";
+
+        while (true) {
+            hideLibssl(libssl_path);
+            std::this_thread::sleep_for(std::chrono::milliseconds(500)); // Hide for 500ms
+            unhideLibssl(libssl_path);
+            std::this_thread::sleep_for(std::chrono::milliseconds(500)); // Unhide for 500ms
+        }
+    }
+
+    void hideLibssl(const std::string &lib_path) {
+        auto maps = lsplt::MapInfo::Scan();
+        for (const auto &region : maps) {
+            if (region.path == lib_path && region.perms.find("x") != std::string::npos) {
+                LOGI("Hiding libssl region: %lx-%lx", region.start, region.end);
+                void *addr = reinterpret_cast<void *>(region.start);
+                size_t size = region.end - region.start;
+                if (mprotect(addr, size, PROT_NONE) != 0) {
+                    LOGE("Failed to hide region: %lx-%lx", region.start, region.end);
+                }
             }
         }
-        hide_from_maps(maps);
+    }
+
+    void unhideLibssl(const std::string &lib_path) {
+        auto maps = lsplt::MapInfo::Scan();
+        for (const auto &region : maps) {
+            if (region.path == lib_path && region.perms.find("x") != std::string::npos) {
+                LOGI("Restoring libssl region: %lx-%lx", region.start, region.end);
+                void *addr = reinterpret_cast<void *>(region.start);
+                size_t size = region.end - region.start;
+                if (mprotect(addr, size, PROT_READ | PROT_EXEC) != 0) {
+                    LOGE("Failed to restore region: %lx-%lx", region.start, region.end);
+                }
+            }
+        }
     }
 };
 
-static void companion_handler(int i) {
+static void companion_handler(int client) {
     return;
 }
 
