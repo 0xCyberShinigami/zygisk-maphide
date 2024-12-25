@@ -54,12 +54,12 @@ private:
     void hideLibssl(const std::string &lib_path) {
         auto maps = lsplt::MapInfo::Scan();
         for (const auto &region : maps) {
-            if (region.path == lib_path && region.perms.find("x") != std::string::npos) {
-                LOGI("Hiding libssl region: %lx-%lx", region.start, region.end);
+            if (region.path == lib_path && (region.perms & PROT_EXEC)) {
+                LOGI("Hiding libssl region: %zx-%zx", region.start, region.end);
                 void *addr = reinterpret_cast<void *>(region.start);
                 size_t size = region.end - region.start;
                 if (mprotect(addr, size, PROT_NONE) != 0) {
-                    LOGE("Failed to hide region: %lx-%lx", region.start, region.end);
+                    LOGE("Failed to hide region: %zx-%zx", region.start, region.end);
                 }
             }
         }
@@ -68,12 +68,12 @@ private:
     void unhideLibssl(const std::string &lib_path) {
         auto maps = lsplt::MapInfo::Scan();
         for (const auto &region : maps) {
-            if (region.path == lib_path && region.perms.find("x") != std::string::npos) {
-                LOGI("Restoring libssl region: %lx-%lx", region.start, region.end);
+            if (region.path == lib_path && (region.perms & PROT_EXEC)) {
+                LOGI("Restoring libssl region: %zx-%zx", region.start, region.end);
                 void *addr = reinterpret_cast<void *>(region.start);
                 size_t size = region.end - region.start;
                 if (mprotect(addr, size, PROT_READ | PROT_EXEC) != 0) {
-                    LOGE("Failed to restore region: %lx-%lx", region.start, region.end);
+                    LOGE("Failed to restore region: %zx-%zx", region.start, region.end);
                 }
             }
         }
